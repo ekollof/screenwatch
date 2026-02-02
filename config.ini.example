@@ -1,0 +1,20 @@
+[DEFAULT]
+# Command to execute when screen is connected/disconnected
+# It's recommended to use a wrapper script for better environment handling
+# Default: autorandr -c
+# Recommended: /home/youruser/.local/bin/screenwatch-handler.sh
+command = autorandr -c
+
+# Comma-separated list of desktop environments to exclude
+# These DEs typically handle screen management themselves
+# Default: COSMIC,GNOME,KDE,Plasma,XFCE,X-Cinnamon
+excluded_desktops = COSMIC,GNOME,KDE,Plasma,XFCE,X-Cinnamon
+
+# Debounce delay in seconds to avoid rapid repeated executions
+# After this delay, the service waits for displays to be ready before executing
+# Default: 2.0
+debounce_delay = 2.0
+
+# Log level: DEBUG, INFO, WARNING, ERROR
+# Default: INFO
+log_level = INFO
