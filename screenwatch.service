@@ -6,6 +6,7 @@ After=graphical-session.target
 [Service]
 Type=simple
 Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+PassEnvironment=XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP DESKTOP_SESSION
 ExecStart=%h/.local/bin/screenwatch
 Restart=on-failure
 RestartSec=5
