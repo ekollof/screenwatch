@@ -17,92 +17,106 @@ log "=== Screen change detected ==="
 
 # Get the actual user's UID
 USER_UID=$(id -u)
-USER_NAME=$(id -un)
 
-# Detect X11 DISPLAY by checking active sockets owned by the user
-detect_x11_display() {
-    # Find X11 sockets owned by the user
-    for socket in /tmp/.X11-unix/X*; do
-        [ -S "$socket" ] || continue
-        
-        # Check if socket is owned by our user
-        if [ "$(stat -c '%U' "$socket" 2>/dev/null)" = "$USER_NAME" ]; then
-            display=":${socket##*X}"
-            log "Found X11 socket for DISPLAY=$display"
-            export DISPLAY="$display"
+# Import display-related environment variables from a running WM/compositor process.
+#
+# X11 sockets in /tmp/.X11-unix/ are frequently owned by root (created by the display
+# manager), so checking socket ownership is unreliable. Instead we read DISPLAY,
+# XAUTHORITY, and WAYLAND_DISPLAY directly from the environment of a known running
+# window manager or compositor process via /proc/<pid>/environ.
+#
+# Add your own WM/compositor to the list if it is not already present.
+import_display_env() {
+    local wm_procs="awm dwm i3 openbox fluxbox bspwm herbstluftwm xmonad
+                    sway hyprland wayfire river labwc
+                    mutter gnome-shell plasmashell kwin_x11 kwin_wayland
+                    xfce4-session lxsession Xorg"
+
+    for proc in $wm_procs; do
+        local pid
+        pid=$(pgrep -u "$USER_UID" -x "$proc" 2>/dev/null | head -n1)
+        [ -n "$pid" ] || continue
+
+        log "Reading environment from $proc (pid $pid)"
+
+        # Parse the NUL-delimited environ file in a single pass
+        local found_display=0 found_xauth=0 found_wayland=0
+        while IFS='=' read -r -d '' key value; do
+            case "$key" in
+                DISPLAY)
+                    if [ -z "$DISPLAY" ]; then
+                        export DISPLAY="$value"
+                        log "  Imported DISPLAY=$value"
+                        found_display=1
+                    fi
+                    ;;
+                XAUTHORITY)
+                    if [ -z "$XAUTHORITY" ]; then
+                        export XAUTHORITY="$value"
+                        log "  Imported XAUTHORITY=$value"
+                        found_xauth=1
+                    fi
+                    ;;
+                WAYLAND_DISPLAY)
+                    if [ -z "$WAYLAND_DISPLAY" ]; then
+                        export WAYLAND_DISPLAY="$value"
+                        log "  Imported WAYLAND_DISPLAY=$value"
+                        found_wayland=1
+                    fi
+                    ;;
+            esac
+        done < /proc/"$pid"/environ
+
+        # Return as soon as we have enough to proceed
+        if [ $found_display -eq 1 ] || [ $found_wayland -eq 1 ]; then
             return 0
         fi
     done
-    
-    # Fallback: check Xorg command line
-    local xorg_display=$(pgrep -u "$USER_UID" -a Xorg | grep -oP ':\d+' | head -n1)
-    if [ -n "$xorg_display" ]; then
-        log "Found DISPLAY=$xorg_display from Xorg command line"
-        export DISPLAY="$xorg_display"
-        return 0
-    fi
-    
+
     return 1
 }
 
-# Detect Wayland display
-detect_wayland_display() {
-    # Check common Wayland socket locations
-    for socket in "$XDG_RUNTIME_DIR"/wayland-* /run/user/"$USER_UID"/wayland-*; do
+# Fallback: detect Wayland socket directly from the runtime directory
+detect_wayland_fallback() {
+    local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$USER_UID}"
+    for socket in "$runtime_dir"/wayland-*; do
         if [ -S "$socket" ]; then
-            wayland_display=$(basename "$socket")
-            log "Found Wayland socket: $wayland_display"
-            export WAYLAND_DISPLAY="$wayland_display"
+            export WAYLAND_DISPLAY="$(basename "$socket")"
+            log "Fallback: found Wayland socket $WAYLAND_DISPLAY"
             return 0
         fi
     done
     return 1
 }
 
-# Import XAUTHORITY from a running process
-import_xauthority() {
-    for proc in dwm i3 gnome-shell plasmashell xfce4-session Xorg; do
-        pid=$(pgrep -u "$USER_UID" "$proc" | head -n1)
-        if [ -n "$pid" ]; then
-            while IFS='=' read -r -d '' key value; do
-                if [ "$key" = "XAUTHORITY" ]; then
-                    export XAUTHORITY="$value"
-                    log "Imported XAUTHORITY=$value from $proc"
-                    return 0
-                fi
-            done < /proc/"$pid"/environ
+# --- Set up display environment ---
+
+# Only probe if the vars are not already set (e.g. PassEnvironment worked)
+if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+    if ! import_display_env; then
+        log "WM process scan found nothing; trying Wayland socket fallback"
+        if ! detect_wayland_fallback; then
+            log "WARNING: Could not detect display from any source"
         fi
-    done
-    return 1
-}
-
-# Detect display and set up environment
-if ! detect_wayland_display; then
-    if ! detect_x11_display; then
-        log "ERROR: Could not detect X11 or Wayland display"
     fi
 fi
 
-# Import or set XAUTHORITY
-if [ -z "$XAUTHORITY" ]; then
-    if ! import_xauthority; then
-        export XAUTHORITY="$HOME/.Xauthority"
-        log "Using default XAUTHORITY=$XAUTHORITY"
-    fi
+# XAUTHORITY fallback: use ~/.Xauthority if still unset
+if [ -z "$XAUTHORITY" ] && [ -n "$DISPLAY" ]; then
+    export XAUTHORITY="$HOME/.Xauthority"
+    log "XAUTHORITY not found in WM environment; using default $XAUTHORITY"
 fi
 
-# Check if DISPLAY is still not set
+# Bail out if we have neither an X11 nor a Wayland display
 if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     log "ERROR: No DISPLAY or WAYLAND_DISPLAY found, cannot configure screens"
     exit 1
 fi
 
-log "Using DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY"
-
-# Wait for displays to stabilize (removed - now handled by screenwatch itself)
-# The screenwatch service now waits for displays to be ready in udev
+log "Using DISPLAY=${DISPLAY:-<unset>} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-<unset>} XAUTHORITY=${XAUTHORITY:-<unset>}"
 
 # Run autorandr
+# (display-ready waiting is handled by screenwatch itself before invoking this script)
 log "Running autorandr -c"
 if autorandr -c >> "$LOG_FILE" 2>&1; then
     log "autorandr completed successfully"
